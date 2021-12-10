@@ -1,22 +1,26 @@
 #include <cassert>
 #include <cstdint>
 #include <vector>
+#include <queue>
+#include <list>
+#include <limits>
 
 #include "interface.h"
 
 using std::size_t;
 using std::vector;
+using std::queue;
+using std::list;
 
 /// This is sample empty implementation you can place your solution here or delete this and include tests to your solution
 
-// ???? no client will be added with an arrival time earlier than those clients that are already added
-// ???? clients that can take what they want will leave in order of arrival??
-// ???? first clients that can take what they want leave or clients that have waited their limit
+// ???? clients that can take what they want will leave in order of arrival?? - yes
+// ???? first clients that can take what they want leave or clients that have waited their limit - in order of index
 // !!!! clients may be added before the time has been advanced to their arrival time
 
 struct RestockingMission {
-    int ETA_minute;
-    ResourceType resourceType;
+    int minute;
+    ResourceType type;
     int leftoverQuantity;
     //the restock quantity itself is always the same
     //however we need to know how much from the restock quantity will be left over for 
@@ -24,155 +28,307 @@ struct RestockingMission {
 };
 
 struct ClientWrapper {
+    ClientWrapper(int index, const Client &client) : index(index), arriveMinute(client.arriveMinute), banana(client.banana), schweppes(client.schweppes), maxWaitTime(client.maxWaitTime) {}
     int index;
-    Client data;
+    int arriveMinute;
+    int banana;
+    int schweppes;
+    int maxWaitTime;
 };
 
-class MyStore : Store {
+struct Event {
+	enum Type {
+		None, WorkerSend, WorkerBack, ClientArrive, ClientDepart
+	};
+
+	Type type;
+	int minute;
+
+	struct Worker {
+		ResourceType resource;
+	} worker;
+
+	struct Client {
+		int index;
+		int banana;
+		int schweppes;
+	} client;
+};
+
+///below class's purpose is to abstract the logic for the order of event dispatch specified in the assignment
+///does so by not flushing events that happen at the same time until an event at a later time comes
+///and then flushes them not in the order it got them in but in the desired order from the assignment
+///ensures correct order of events dispatch
+///assumes events will be passed in order of occurrence minute
+///assumes there will not be any Event::None or Event::ClientArrive events sent
+///assumes banana restocks are passed before schweppes restocks
+///assumes that you will call flush when you know that there will be no more events in the same minute
+class ActionHandlerWrapper { 
 public:
-	void setActionHandler(ActionHandler *handler) override {
-		actionHandler = handler;
-	}
+    ActionHandlerWrapper(ActionHandler *handler) : handler(handler) {}
 
-	void init(int workerCount, int startBanana, int startSchweppes) override {
-        minute = 0;
-        availableWorkers = workerCount;
-        banana = startBanana;
-        schweppes = startSchweppes;
-	}
+    void onWorkerSend(int minute, ResourceType resource) {
+        if (checkAutomaticFlush(minute)) {
+            flush();
+        }
+        unflushedWorkerSend.push({Event::Type::WorkerSend, minute, {resource}});
+    }
 
-    void addClient(const Client &client) {
-        stack<RestockingMission> willArriveOnTime;
-        //TODO: check <=
-        //we iterate over all pending restocks that will arrive before the client leaves
-        //and calculate how much stock will be left from those restocks for the new client
-        int leftoverSchweppes = 0;
-        int leftoverBanana = 0;
-        while (!pendingRestocks.empty() && pendingRestocks.front().ETA_minute <= client.arriveMinute + client.maxWaitTime) { 
-            if (pendingRestocks.front().resourceType == ResourceType::schweppes) {
-                leftoverSchweppes += pendingRestocks.front().leftoverQuantity;
-            } else {
-                leftoverBanana += pendingRestocks.front().leftoverQuantity;
-            }
-            willArriveOnTime.push(pendingRestocks.front());
-            pendingRestocks.pop();
+    void onWorkerBack(int minute, ResourceType resource) {
+        if (checkAutomaticFlush(minute)) {
+            flush();
         }
-        while (!willArriveOnTime.empty()) {
-            pendingRestocks.push_front(willArriveOnTime.top());
-            willArriveOnTime.pop();
+        unflushedWorkerBack.push({Event::Type::WorkerBack, minute, {resource}});
+    }
+
+    void onClientDepart(int index, int minute, int banana, int schweppes) {
+        if (checkAutomaticFlush(minute)) {
+            flush();
         }
-        int schweppesShortage = client.schweppes - leftoverSchweppes - schweppes;
-        int bananaShortage = client.banana - leftoverBanana - banana;
-        while (workerCount && (schweppesShortage > 0 || bananaShortage > 0)) {
-            if (schweppesShortage > bananaShortage) {
-                pendingRestocks.push_back({
-                    minute + 60,
-                    ResourceType::schweppes,
-                    100-schweppesShortage,
-                });
-                actionHandler->onWorkerSend(client.arriveMinute, ResourceType::schweppes);
-                --workerCount;
-                schweppesShortage -= 100;
+        unflushedClientDepart.push({Event::Type::ClientDepart, minute, {}, {index, banana, schweppes}});
+    }
+
+    void flush() {
+        while (!unflushedWorkerSend.empty() || !unflushedWorkerBack.empty() || !unflushedClientDepart.empty()) { //assumes only events at equal minute are unflushed
+            const auto &ev = (!unflushedWorkerSend.empty())? unflushedWorkerSend.front(): (!unflushedWorkerBack.empty())? unflushedWorkerBack.front(): unflushedClientDepart.front();
+            if (ev.type == Event::Type::WorkerSend) {
+                handler->onWorkerSend(ev.minute, ev.worker.resource);
+            } else if (ev.type == Event::Type::WorkerBack) {
+                handler->onWorkerBack(ev.minute, ev.worker.resource);
             } else {
-                pendingRestocks.push_back({
-                    minute + 60,
-                    ResourceType::banana,
-                    100-bananaShortage,
-                });
-                actionHandler->onWorkerSend(client.arriveMinute, ResourceType::banana);
-                --workerCount;
-                bananaShortage -= 100;
+                handler->onClientDepart(ev.client.index, ev.minute, ev.client.banana, ev.client.schweppes);
             }
         }
     }
+private:
+    ActionHandler *handler;
+    queue<Event> unflushedWorkerSend;
+    queue<Event> unflushedWorkerBack;
+    queue<Event> unflushedClientDepart;
+
+    bool checkAutomaticFlush(int eventMinute) const {
+        if (!unflushedWorkerSend.empty() && eventMinute > unflushedWorkerSend.front().minute) 
+            return true;
+        if (!unflushedWorkerBack.empty() && eventMinute > unflushedWorkerBack.front().minute)
+            return true;
+        if (!unflushedClientDepart.empty() && eventMinute > unflushedClientDepart.front().minute)
+            return true;
+        return false;
+    }
+};
+
+
+
+class MyStore : public Store {
+public:
+	void setActionHandler(ActionHandler *handler) override {
+		actionHandler = new ActionHandlerWrapper(handler);
+	}
+
+	void init(int workerCount, int startBanana, int startSchweppes) override {
+        minute = -1;
+        availableWorkers = workerCount;
+        banana = startBanana;
+        schweppes = startSchweppes;
+        nextClientIndex = 0;
+	}
 
 	void addClients(const Client *clients, int count) override {
         for (size_t i=0; i<count; ++i) {
-            arrivingClients.push(clients[i]);
+            arrivingClients.push(ClientWrapper(
+                nextClientIndex + i,
+                {clients[i]}
+            ));
             if (i > 0) {
                 assert(clients[i-1].arriveMinute <= clients[i].arriveMinute);
             }
         }
+        nextClientIndex = count;
 	}
-
 	void advanceTo(int minute) override {
-        this->minute = minute; // ??? is it even needed?
-        //first the clients arrive
-        /* while (!arrivingClients.empty() && arrivingClients.front().arriveMinute <= minute) */
-        /* addClient(clients[i]); */
-        //all at the same moment:
-        //first arrive the restockings
-        while (minute >= pendingRestocks.front().ETA_minute) {
-            auto restock = pendingRestocks.front();
-            if (restock.resourceType == ResourceType::schweppes) {
-                schweppes += 100;
+        assert(minute > this->minute);
+        //send, arrive restock, sell
+        //below loop executes all events up to that minute in their order of occurrence
+        //executes events from the same minute in the following order: clients arrive, restocks send, restocks arrive, clients depart, 
+        for (Event::Type eventType = nextEvent(minute); this->minute <= minute && eventType != Event::Type::None; eventType = nextEvent(minute)) {
+            if (eventType == Event::Type::ClientArrive) {
+                assert(!arrivingClients.empty());
+                const auto &client = arrivingClients.front();
+                addClient(client); // it implicitly takes into account subsequent events from the loop when deciding whether to send a worker
+                this->minute = client.arriveMinute; //maybe put before addClient?
+                arrivingClients.pop();
+            } else if (eventType == Event::Type::ClientDepart) {
+                const auto it = getLeavingClientIT();
+                assert(it != waitingClients.end());
+                const auto &client = *it;
+                int leaveTime = getLeaveTime(client);
+                banana    -= std::min(banana, client.banana);
+                schweppes -= std::min(schweppes, client.schweppes);
+                actionHandler->onClientDepart(client.index, leaveTime, client.banana, client.schweppes);
+                this->minute = leaveTime;
+                waitingClients.erase(it); 
             } else {
-                banana += 100;
-            }
-            pendingRestocks.pop_front();
-        }
-        //then the clients get serviced
-        {
-            auto it = waitingClients.begin();
-            while (it != waitingClients.end()) {
-                const auto [index, client] = *it;
-                if (client.banana <= banana && client.schweppes <= schweppes) {
-                    banana -= client.banana;
-                    schweppes -= client.schweppes;
-                    actionHandler->onClientDepart(index, minute, client.banana, clients.schweppes);
-                    it = waitingClients.erase(it);
+                assert(!pendingRestocks.empty());
+                assert(eventType == Event::Type::WorkerBack);
+                const auto &restock = pendingRestocks.front();
+                if (restock.type == ResourceType::banana) {
+                    banana += 100;
                 } else {
-                    ++it;
+                    assert(restock.type == ResourceType::schweppes);
+                    schweppes += 100;
                 }
+                actionHandler->onWorkerBack(restock.minute, restock.type);
+                ++availableWorkers;
+                this->minute = restock.minute;
+                pendingRestocks.pop();
             }
         }
-        //then the clients that cannot wait anymore leave
-        {
-            priority_queue<ClientWrapper> leavingClients;
-            auto it = waitingClients.begin();
-            while (it != waitingClients.end()) {
-                const auto [index, client] = *it;
-                if (client.arriveMinute + client.maxWaitTime <= minute) {
-                    leavingClients.push({index, client});
-                    it = waitingClients.erase(it);
-                } else {
-                    ++it;
-                }
-            }
+        //restocks arrive
+        //clients arrive
+        //clients leave
+        //restocks send
 
-            while (!leavingClients.empty()) {
-                const auto [index, client] = leavingClients.top();
-                actionHandler->onClientDepart(
-                    index,
-                    client.arriveMinute + client.maxWaitTime,
-                    std::min(client.banana, banana),
-                    std::min(client.schweppes, schweppes)
-                );
-                banana    -= std::min(client.banana, banana);
-                schweppes -= std::min(client.schweppes, schweppes);
-                leavingClients.pop();
-            }
-        }
+        actionHandler->flush();
 	}
 
-	virtual int getBanana() const {
+	int getBanana() const override {
 		return banana;
 	}
 
-	virtual int getSchweppes() const {
+	int getSchweppes() const override {
 		return schweppes;
 	}
 
 private:
-	ActionHandler *actionHandler = nullptr;
+    Event::Type nextEvent(int minute) const {
+        Event::Type ans = Event::Type::None;
+        // keep in mind it is possible to have clients have maxWaitTime=0
+        /* if (!leavingClients.empty() && leavingClients.top().arriveMinute + leavingClients.top().maxWaitTime <= minute) { */
+        /*     minute = leavingClients.top().arriveMinute + leavingClients.top().maxWaitTime; */
+        /*     ans = Event::Type::ClientDepart; */
+        /* } */
+        if (!waitingClients.empty()) {
+            const auto res = getLeavingClientIT();
+            if (res != waitingClients.end()) {
+                const auto &leavingClient = *res;
+                minute = getLeaveTime(leavingClient);
+                ans = Event::Type::ClientDepart;
+            }
+        }
+        //pending restocks must override leaving clients if possible
+        if (!pendingRestocks.empty() && pendingRestocks.front().minute <= minute) {
+            minute = pendingRestocks.front().minute;
+            ans = Event::Type::WorkerBack;
+        }
+        //arriving clients must override pending restocks if possible
+        if (!arrivingClients.empty() && arrivingClients.front().arriveMinute <= minute) {
+            ans = Event::Type::ClientArrive;
+        }
+        return ans;
+    }
 
+    //This action handler tracks how much of each resource any particular customer bought
+    struct TrackClientActionHandler : ActionHandler {
+        explicit TrackClientActionHandler(int trackIndex) : trackIndex(trackIndex) {}
+        void onClientDepart(int index, int minute, int banana, int schweppes) override {
+            if (index == trackIndex) {
+                boughtBanana = banana;
+                boughtSchweppes = schweppes;
+            }
+        }
+        void onWorkerSend(int minute, ResourceType resource) override {}
+        void onWorkerBack(int minute, ResourceType resource) override {}
+
+        int trackIndex;
+        int boughtBanana = 0;
+        int boughtSchweppes = 0;
+        /* int boughtBanana() {} */
+        /* int boughtSchweppes() {} */
+    };
+    void addClient(const ClientWrapper &client) {
+        waitingClients.push_back(client);
+        if (client.maxWaitTime <= 60 && availableWorkers) {
+            //check if he leaves unsatisfied and if it can even be rectified
+            int bananaShortage, schweppesShortage;
+            do {
+                // we need to copy the store on every step
+                // so that we take into account whether
+                // previous clients will take from the additional restocked quantity
+                MyStore alternateStore = *this;
+                TrackClientActionHandler tracker(client.index);
+                alternateStore.setActionHandler(&tracker);
+                // we can't have foresight for clients that have not yet arrived
+                // and also don't want infinite recursion:
+                alternateStore.arrivingClients = {}; 
+                alternateStore.advanceTo(client.arriveMinute + client.maxWaitTime);
+                int bananaShortage = client.banana - tracker.boughtBanana;
+                int schweppesShortage = client.schweppes - tracker.boughtSchweppes;
+                if (bananaShortage > 0 || schweppesShortage > 0) {
+                    if (bananaShortage > schweppesShortage) { // if equal sends banana restocks first
+                        pendingRestocks.push({
+                            this->minute, 
+                            ResourceType::banana
+                        });
+                        actionHandler->onWorkerSend(this->minute, ResourceType::banana);
+                    } else {
+                        pendingRestocks.push({
+                            this->minute, 
+                            ResourceType::schweppes
+                        });
+                        actionHandler->onWorkerSend(this->minute, ResourceType::schweppes);
+                    }
+                    --availableWorkers;
+                }
+            } while (availableWorkers && (bananaShortage > 0 || schweppesShortage > 0)); 
+        }
+        //check if he takes from someone
+        //according to answers from discord it isn't necessary
+    }
+
+	ActionHandlerWrapper *actionHandler = nullptr;
+
+    int minute;
     int schweppes;
     int banana;
-    int minute;
     int availableWorkers;
+    int nextClientIndex;
+
+    /* auto leavingClients = priority_queue<int, vector<int>>{leavesAfter}; */
     queue<ClientWrapper> arrivingClients;
     list<ClientWrapper> waitingClients;
-    deque<RestockingMission> pendingRestocks;
+    queue<RestockingMission> pendingRestocks;
+
+    int getLeaveTime(const ClientWrapper &client) const {
+        if (client.banana <= banana && client.schweppes <= schweppes)
+            return this->minute;
+        return client.arriveMinute + client.maxWaitTime;
+    }
+
+    bool leavesFirst(const ClientWrapper &clientA, const ClientWrapper &clientB) const {
+        int AleaveTime = getLeaveTime(clientA);
+        int BleaveTime = getLeaveTime(clientB);
+        if (AleaveTime < BleaveTime) 
+            return true;
+        if (AleaveTime > BleaveTime) 
+            return false;
+        return clientA.index < clientB.index;
+    }
+
+    //consider removing const if it makes you implement const_iterator
+    typename decltype(waitingClients)::const_iterator getLeavingClientIT() const {
+        assert(!waitingClients.empty());
+        auto returnIT = waitingClients.end();
+        for (auto it = waitingClients.begin(); it != waitingClients.end(); ++it) {
+            const auto &client = *it;
+            assert(client.arriveMinute + client.maxWaitTime >= this->minute);
+            if (returnIT == waitingClients.end()) {
+                returnIT = it;
+            } else if (leavesFirst(*it, *returnIT)) {
+                returnIT = it;
+            }
+        }
+        return returnIT;
+    }
 };
 
 Store *createStore() {

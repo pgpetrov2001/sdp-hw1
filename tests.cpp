@@ -1,6 +1,6 @@
 #define CATCH_CONFIG_MAIN
 
-#include "interface.h"
+#include "../src/interface.h"
 #include "catch.hpp"
 
 #include <vector>
@@ -97,6 +97,7 @@ struct TestStore : ActionHandler {
 };
 
 #define LastEvent() (store.log.back())
+#define EventsHappened() (store.log.size() > 0)
 
 TEST_CASE("No workers, empty store, up to one client") {
 	TestStore store;
@@ -133,9 +134,9 @@ TEST_CASE("No workers, empty store, up to one client") {
 		INFO("Client with wait time 0, must generate event at the time of arrival");
 		store.addClients(Client{0, 0, 0, 0});
 		store.advanceTo(0);
-		REQUIRE(store.log.size() == 1);
 
 		INFO("Client without any request should depart empty - (0 banana, 0 schweppes)");
+		REQUIRE(store.log.size() == 1);
 		REQUIRE(LastEvent().minute == 0);
 		REQUIRE(LastEvent().type == StoreEvent::ClientDepart);
 		REQUIRE(LastEvent().client.banana == 0);
@@ -190,6 +191,7 @@ TEST_CASE("No workers, full store") {
 		store.addClients(three);
 		store.advanceTo(0);
 		INFO("Indices must be correct");
+        REQUIRE(store.log.size() == 3);
 		REQUIRE(store.log[0].client.index == 0);
 		REQUIRE(store.log[1].client.index == 1);
 		REQUIRE(store.log[2].client.index == 2);
@@ -229,10 +231,12 @@ TEST_CASE("Multiple stores") {
 		bananaStore.advanceTo(0);
 		schweppesStore.advanceTo(0);
 
+        REQUIRE(bananaStore.log.size() > 0);
 		INFO("Both stores should generate valid evenets");
 		REQUIRE(bananaStore.log.back().type == StoreEvent::ClientDepart);
 		REQUIRE(bananaStore.log.back().client.banana == 5);
 
+        REQUIRE(schweppesStore.log.size() > 0);
 		REQUIRE(schweppesStore.log.back().type == StoreEvent::ClientDepart);
 		REQUIRE(schweppesStore.log.back().client.schweppes == 10);
 	}
@@ -367,6 +371,7 @@ TEST_CASE("Clients depart and take what they can") {
 		store.advanceTo(1 + 5);
 
 		INFO("Client must take whatever is available");
+        REQUIRE(EventsHappened());
 		REQUIRE(LastEvent().type == StoreEvent::ClientDepart);
 		REQUIRE(LastEvent().client.banana == 10);
 		REQUIRE(LastEvent().client.schweppes == 0);
