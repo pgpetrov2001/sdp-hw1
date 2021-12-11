@@ -1,22 +1,29 @@
 #include <cassert>
 #include <cstdint>
 #include <vector>
-#include <queue>
-#include <list>
+/* #include <queue> */
+/* #include <list> */
 #include <limits>
 
 #include "interface.h"
+#include "queue.h"
+#include "forward_list.h"
 
 using std::size_t;
 using std::vector;
-using std::queue;
-using std::list;
+/* using std::queue; */
+/* using std::list; */
+template <typename T>
+using list = forward_list<T>;
 
 /// This is sample empty implementation you can place your solution here or delete this and include tests to your solution
 
 // ???? clients that can take what they want will leave in order of arrival?? - yes
 // ???? first clients that can take what they want leave or clients that have waited their limit - in order of index
 // !!!! clients may be added before the time has been advanced to their arrival time
+// !!!! assumption: don't need to send multiple restock missions for a single client 
+// (otherwise the rule becomes, send restock even if not necessary, but don't send any unnecessary restocks above those that have been already sent that were necessary)
+// !!!! assumption: don't need to send restocks for old clients when new clients arrive to make up for what the new client will steal from the old one
 
 struct RestockingMission {
     int minute;
@@ -59,6 +66,7 @@ struct Event {
 ///does so by not flushing events that happen at the same time until an event at a later time comes
 ///and then flushes them not in the order it got them in but in the desired order from the assignment
 ///ensures correct order of events dispatch
+///used in the class implementation, does't not interfere with the interface!!!!!!
 ///assumes events will be passed in order of occurrence minute
 ///assumes there will not be any Event::None or Event::ClientArrive events sent
 ///assumes banana restocks are passed before schweppes restocks
@@ -90,7 +98,8 @@ public:
 
     void flush() {
         while (!unflushedWorkerSend.empty() || !unflushedWorkerBack.empty() || !unflushedClientDepart.empty()) { //assumes only events at equal minute are unflushed
-            const auto &ev = (!unflushedWorkerSend.empty())? unflushedWorkerSend.front(): (!unflushedWorkerBack.empty())? unflushedWorkerBack.front(): unflushedClientDepart.front();
+            auto &q = (!unflushedWorkerSend.empty())? unflushedWorkerSend: (!unflushedWorkerBack.empty())? unflushedWorkerBack: unflushedClientDepart;
+            const auto &ev = q.front();
             if (ev.type == Event::Type::WorkerSend) {
                 handler->onWorkerSend(ev.minute, ev.worker.resource);
             } else if (ev.type == Event::Type::WorkerBack) {
@@ -98,6 +107,7 @@ public:
             } else {
                 handler->onClientDepart(ev.client.index, ev.minute, ev.client.banana, ev.client.schweppes);
             }
+            q.pop();
         }
     }
 private:
@@ -126,7 +136,7 @@ public:
 	}
 
 	void init(int workerCount, int startBanana, int startSchweppes) override {
-        minute = -1;
+        minute = 0;
         availableWorkers = workerCount;
         banana = startBanana;
         schweppes = startSchweppes;
@@ -146,25 +156,28 @@ public:
         nextClientIndex = count;
 	}
 	void advanceTo(int minute) override {
-        assert(minute > this->minute);
+        assert(minute >= this->minute);
         //send, arrive restock, sell
         //below loop executes all events up to that minute in their order of occurrence
         //executes events from the same minute in the following order: clients arrive, restocks send, restocks arrive, clients depart, 
+        //wrapper of actionHandler will ensure the order is according to the assignment
         for (Event::Type eventType = nextEvent(minute); this->minute <= minute && eventType != Event::Type::None; eventType = nextEvent(minute)) {
             if (eventType == Event::Type::ClientArrive) {
                 assert(!arrivingClients.empty());
                 const auto &client = arrivingClients.front();
+                this->minute = client.arriveMinute; //above or below addClient
                 addClient(client); // it implicitly takes into account subsequent events from the loop when deciding whether to send a worker
-                this->minute = client.arriveMinute; //maybe put before addClient?
                 arrivingClients.pop();
             } else if (eventType == Event::Type::ClientDepart) {
-                const auto it = getLeavingClientIT();
+                auto it = getLeavingClientIT();
                 assert(it != waitingClients.end());
                 const auto &client = *it;
                 int leaveTime = getLeaveTime(client);
-                banana    -= std::min(banana, client.banana);
-                schweppes -= std::min(schweppes, client.schweppes);
-                actionHandler->onClientDepart(client.index, leaveTime, client.banana, client.schweppes);
+                int takeBanana = std::min(banana, client.banana);
+                int takeSchweppes = std::min(schweppes, client.schweppes);
+                banana    -= takeBanana;
+                schweppes -= takeSchweppes;
+                actionHandler->onClientDepart(client.index, leaveTime, takeBanana, takeSchweppes);
                 this->minute = leaveTime;
                 waitingClients.erase(it); 
             } else {
@@ -203,17 +216,16 @@ private:
     Event::Type nextEvent(int minute) const {
         Event::Type ans = Event::Type::None;
         // keep in mind it is possible to have clients have maxWaitTime=0
-        /* if (!leavingClients.empty() && leavingClients.top().arriveMinute + leavingClients.top().maxWaitTime <= minute) { */
-        /*     minute = leavingClients.top().arriveMinute + leavingClients.top().maxWaitTime; */
-        /*     ans = Event::Type::ClientDepart; */
-        /* } */
         if (!waitingClients.empty()) {
             const auto res = getLeavingClientIT();
             if (res != waitingClients.end()) {
                 const auto &leavingClient = *res;
-                minute = getLeaveTime(leavingClient);
-                ans = Event::Type::ClientDepart;
-            }
+                int leaveMinute = getLeaveTime(leavingClient); // client leaves now if he has enough or waits till limit
+                if (leaveMinute <= minute) {
+                    minute = leaveMinute;
+                    ans = Event::Type::ClientDepart;
+                }
+            } 
         }
         //pending restocks must override leaving clients if possible
         if (!pendingRestocks.empty() && pendingRestocks.front().minute <= minute) {
@@ -247,40 +259,35 @@ private:
     };
     void addClient(const ClientWrapper &client) {
         waitingClients.push_back(client);
-        if (client.maxWaitTime <= 60 && availableWorkers) {
-            //check if he leaves unsatisfied and if it can even be rectified
-            int bananaShortage, schweppesShortage;
-            do {
-                // we need to copy the store on every step
-                // so that we take into account whether
-                // previous clients will take from the additional restocked quantity
-                MyStore alternateStore = *this;
-                TrackClientActionHandler tracker(client.index);
-                alternateStore.setActionHandler(&tracker);
-                // we can't have foresight for clients that have not yet arrived
-                // and also don't want infinite recursion:
-                alternateStore.arrivingClients = {}; 
-                alternateStore.advanceTo(client.arriveMinute + client.maxWaitTime);
-                int bananaShortage = client.banana - tracker.boughtBanana;
-                int schweppesShortage = client.schweppes - tracker.boughtSchweppes;
-                if (bananaShortage > 0 || schweppesShortage > 0) {
-                    if (bananaShortage > schweppesShortage) { // if equal sends banana restocks first
-                        pendingRestocks.push({
-                            this->minute, 
-                            ResourceType::banana
-                        });
-                        actionHandler->onWorkerSend(this->minute, ResourceType::banana);
-                    } else {
-                        pendingRestocks.push({
-                            this->minute, 
-                            ResourceType::schweppes
-                        });
-                        actionHandler->onWorkerSend(this->minute, ResourceType::schweppes);
-                    }
-                    --availableWorkers;
-                }
-            } while (availableWorkers && (bananaShortage > 0 || schweppesShortage > 0)); 
-        }
+        //check if he leaves unsatisfied and if it can even be rectified
+        // we need to copy the store on every step
+        // so that we take into account whether
+        // previous clients will take from the additional restocked quantity
+        MyStore alternateStore = *this;
+        TrackClientActionHandler tracker(client.index);
+        alternateStore.setActionHandler(&tracker);
+        // we can't have foresight for clients that have not yet arrived
+        // and also don't want infinite recursion:
+        alternateStore.arrivingClients = {}; 
+        alternateStore.advanceTo(client.arriveMinute + client.maxWaitTime);
+        int bananaShortage = client.banana - tracker.boughtBanana;
+        int schweppesShortage = client.schweppes - tracker.boughtSchweppes;
+        if (availableWorkers && (bananaShortage > 0 || schweppesShortage > 0)) {
+            if (bananaShortage >= schweppesShortage) { // if equal sends banana restocks first
+                pendingRestocks.push({
+                    this->minute+60, 
+                    ResourceType::banana
+                });
+                actionHandler->onWorkerSend(this->minute, ResourceType::banana);
+            } else {
+                pendingRestocks.push({
+                    this->minute+60, 
+                    ResourceType::schweppes
+                });
+                actionHandler->onWorkerSend(this->minute, ResourceType::schweppes);
+            }
+            --availableWorkers;
+        } 
         //check if he takes from someone
         //according to answers from discord it isn't necessary
     }
