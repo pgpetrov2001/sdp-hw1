@@ -19,6 +19,7 @@ public:
     uint64_t size() const;
     bool empty() const;
 private:
+    void increment(int64_t &what) const;
     std::vector<T> data;
     int64_t head = 0;
     int64_t tail = 0;

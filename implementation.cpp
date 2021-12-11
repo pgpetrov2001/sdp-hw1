@@ -1,6 +1,6 @@
 #include <cassert>
 #include <cstdint>
-#include <vector>
+/* #include <vector> */
 /* #include <queue> */
 /* #include <list> */
 #include <limits>
@@ -10,7 +10,7 @@
 #include "forward_list.h"
 
 using std::size_t;
-using std::vector;
+/* using std::vector; */
 /* using std::queue; */
 /* using std::list; */
 template <typename T>
@@ -36,6 +36,7 @@ struct RestockingMission {
 
 struct ClientWrapper {
     ClientWrapper(int index, const Client &client) : index(index), arriveMinute(client.arriveMinute), banana(client.banana), schweppes(client.schweppes), maxWaitTime(client.maxWaitTime) {}
+    ClientWrapper() = default;
     int index;
     int arriveMinute;
     int banana;
@@ -217,7 +218,7 @@ private:
         Event::Type ans = Event::Type::None;
         // keep in mind it is possible to have clients have maxWaitTime=0
         if (!waitingClients.empty()) {
-            const auto res = getLeavingClientIT();
+            auto res = getLeavingClientIT();
             if (res != waitingClients.end()) {
                 const auto &leavingClient = *res;
                 int leaveMinute = getLeaveTime(leavingClient); // client leaves now if he has enough or waits till limit
