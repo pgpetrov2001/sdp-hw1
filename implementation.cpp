@@ -5,9 +5,15 @@
 /* #include <list> */
 #include <limits>
 
+#include <iostream>
+using std::cout;
+using std::endl;
+
 #include "interface.h"
 #include "queue.h"
 #include "forward_list.h"
+
+//works with stl too
 
 using std::size_t;
 /* using std::vector; */
@@ -42,6 +48,9 @@ struct ClientWrapper {
     int banana;
     int schweppes;
     int maxWaitTime;
+    bool operator==(const ClientWrapper &b) const {
+        return index == b.index && arriveMinute == b.arriveMinute && banana == b.banana && schweppes == b.schweppes && maxWaitTime == b.maxWaitTime;
+    }
 };
 
 struct Event {
@@ -130,6 +139,7 @@ private:
 
 
 
+bool flag = true;
 class MyStore : public Store {
 public:
 	void setActionHandler(ActionHandler *handler) override {
@@ -157,12 +167,16 @@ public:
         nextClientIndex = count;
 	}
 	void advanceTo(int minute) override {
+        if (flag)
+        cout << "advancing, waiting cliens:" << waitingClients.size() << endl;;
         assert(minute >= this->minute);
         //send, arrive restock, sell
         //below loop executes all events up to that minute in their order of occurrence
         //executes events from the same minute in the following order: clients arrive, restocks send, restocks arrive, clients depart, 
         //wrapper of actionHandler will ensure the order is according to the assignment
         for (Event::Type eventType = nextEvent(minute); this->minute <= minute && eventType != Event::Type::None; eventType = nextEvent(minute)) {
+            if (flag)
+            cout << "loop waiting: " << waitingClients.size() << endl;
             if (eventType == Event::Type::ClientArrive) {
                 assert(!arrivingClients.empty());
                 const auto &client = arrivingClients.front();
@@ -225,8 +239,16 @@ private:
                 if (leaveMinute <= minute) {
                     minute = leaveMinute;
                     ans = Event::Type::ClientDepart;
+                } else {
+                    if (flag) {
+                    cout << "got a waiting client but not going through" << endl;
+                    cout << "client leave time " << leaveMinute << endl;
+                    cout << "waiting clients count " << waitingClients.size() << endl;
+                    
                 }
-            } 
+            }} else {
+                cout << "got no waiting clients" << endl;
+            }
         }
         //pending restocks must override leaving clients if possible
         if (!pendingRestocks.empty() && pendingRestocks.front().minute <= minute) {
@@ -259,7 +281,11 @@ private:
         /* int boughtSchweppes() {} */
     };
     void addClient(const ClientWrapper &client) {
+        if (flag)
+        cout << "adding client " << client.index << endl;
         waitingClients.push_back(client);
+        if (flag)
+        cout << "now waiting " << waitingClients.size() << endl;
         //check if he leaves unsatisfied and if it can even be rectified
         // we need to copy the store on every step
         // so that we take into account whether
@@ -270,7 +296,9 @@ private:
         // we can't have foresight for clients that have not yet arrived
         // and also don't want infinite recursion:
         alternateStore.arrivingClients = {}; 
+        flag = false;
         alternateStore.advanceTo(client.arriveMinute + client.maxWaitTime);
+        flag = true;
         int bananaShortage = client.banana - tracker.boughtBanana;
         int schweppesShortage = client.schweppes - tracker.boughtSchweppes;
         if (availableWorkers && (bananaShortage > 0 || schweppesShortage > 0)) {
@@ -289,6 +317,8 @@ private:
             }
             --availableWorkers;
         } 
+        if (flag)
+        cout << "after that waiting " << waitingClients.size() << endl;
         //check if he takes from someone
         //according to answers from discord it isn't necessary
     }
@@ -326,8 +356,12 @@ private:
     typename decltype(waitingClients)::const_iterator getLeavingClientIT() const {
         assert(!waitingClients.empty());
         auto returnIT = waitingClients.end();
+        cout << "starting search, there are waiting clients: " << waitingClients.size() << endl;
+        cout << "searching from here" << &waitingClients << endl;
         for (auto it = waitingClients.begin(); it != waitingClients.end(); ++it) {
             const auto &client = *it;
+            cout << "at iterator " << &(*it) << endl;
+            cout << "checking out client with index " << client.index << endl;
             assert(client.arriveMinute + client.maxWaitTime >= this->minute);
             if (returnIT == waitingClients.end()) {
                 returnIT = it;
@@ -335,6 +369,7 @@ private:
                 returnIT = it;
             }
         }
+        cout << "finished searching for leaving clients" << endl;
         return returnIT;
     }
 };
